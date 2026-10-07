@@ -144,14 +144,15 @@ def test_budget_exhausted_run_is_not_a_complete_record() -> None:
     assert "budget_exhausted" in doc["completeness"]["caveats"][0]
 
 
-def test_unfinished_agent_makes_the_record_partial() -> None:
-    doc = _document(
-        agent_graph=_graph(statuses={"agent-1": "crashed"}),
-        exit_reason="finished_by_tool",
-    )
+def test_unfinished_agents_make_the_record_partial() -> None:
+    for status in ("budget_paused", "crashed", "failed"):
+        doc = _document(
+            agent_graph=_graph(statuses={"agent-1": status}),
+            exit_reason="finished_by_tool",
+        )
 
-    assert doc["completeness"]["complete"] is False
-    assert "authz-tester" in doc["completeness"]["caveats"][0]
+        assert doc["completeness"]["complete"] is False
+        assert "authz-tester" in doc["completeness"]["caveats"][0]
 
 
 def test_failed_run_status_makes_the_record_partial() -> None:
