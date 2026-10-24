@@ -432,6 +432,41 @@ def test_source_upload_polls_while_platform_is_processing(
     assert ("DELETE", "/uploads/upload-1") not in calls
 
 
+def test_source_upload_processing_poll_stops_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(source_scan, "_UPLOAD_PROCESSING_POLL_S", 5)
+    monkeypatch.setattr(source_scan, "_UPLOAD_PROCESSING_TIMEOUT_S", 12)
+    now = 0.0
+    sleeps: list[float] = []
+    complete_calls = 0
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    def fake_request(method: str, path: str, **_kwargs: Any) -> FakeResponse:
+        nonlocal complete_calls
+        assert method == "POST"
+        assert path == "/uploads/complete"
+        complete_calls += 1
+        return FakeResponse({"status": "processing"}, status_code=202)
+
+    monkeypatch.setattr("strix.interface.cloud.source_scan.time.monotonic", monotonic)
+    monkeypatch.setattr("strix.interface.cloud.source_scan.time.sleep", sleep)
+    monkeypatch.setattr(http, "request", fake_request)
+
+    with pytest.raises(http.CloudError, match=r"still processing.*after 12 seconds"):
+        source_scan._complete_upload("upload-1", token=None)
+
+    assert complete_calls == 4
+    assert sleeps == [5, 5, 2]
+
+
 def test_source_upload_kept_when_processing_outlasts_poll_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
