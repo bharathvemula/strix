@@ -371,3 +371,90 @@ def test_calibration_metadata_survives_into_result_properties(tmp_path: Path) ->
     assert strix["confidence_rationale"] == "Reproduced once out of three attempts."
     assert strix["severity_change_conditions"] == "Critical if the WAF rule is removed."
     assert strix["fix_verification"] == "Not retested."
+
+
+def test_same_cwe_distinct_classes_get_distinct_rules(tmp_path: Path) -> None:
+    # Regression for #1575: ruleId was the bare CWE, so distinct findings
+    # sharing one CWE collapsed into a single rule.
+    write_sarif(
+        tmp_path,
+        [
+            _finding(
+                id="vuln-0001",
+                title="Insecure Direct Object Reference via login parameter",
+                cwe="CWE-639",
+            ),
+            _finding(
+                id="vuln-0002",
+                title="Broken Access Control allows viewing other users' orders",
+                cwe="CWE-639",
+            ),
+        ],
+    )
+    run = _read(tmp_path)["runs"][0]
+    rules = run["tool"]["driver"]["rules"]
+    results = run["results"]
+
+    assert [rule["id"] for rule in rules] == [
+        "CWE-639/insecure-direct-object-reference",
+        "CWE-639/broken-access-control",
+    ]
+    assert [result["ruleId"] for result in results] == [
+        "CWE-639/insecure-direct-object-reference",
+        "CWE-639/broken-access-control",
+    ]
+    for result in results:
+        assert rules[result["ruleIndex"]]["id"] == result["ruleId"]
+    # The class qualifier must not leak into the CWE tag or help link.
+    for rule in rules:
+        assert "CWE-639" in rule["properties"]["tags"]
+        assert rule["helpUri"] == "https://cwe.mitre.org/data/definitions/639.html"
+
+
+def test_same_cwe_same_class_shares_one_rule(tmp_path: Path) -> None:
+    # Class-level dedup is preserved: two SQL-injection findings under
+    # one CWE still share a single rule.
+    write_sarif(
+        tmp_path,
+        [
+            _finding(id="vuln-0001", title="SQL Injection in login", cwe="CWE-89"),
+            _finding(id="vuln-0002", title="SQL Injection in search", cwe="CWE-89"),
+        ],
+    )
+    run = _read(tmp_path)["runs"][0]
+    rules = run["tool"]["driver"]["rules"]
+
+    assert [rule["id"] for rule in rules] == ["CWE-89/sql-injection"]
+    assert [result["ruleId"] for result in run["results"]] == [
+        "CWE-89/sql-injection",
+        "CWE-89/sql-injection",
+    ]
+
+
+def test_cwe_rule_without_curated_class_keeps_bare_cwe_id(tmp_path: Path) -> None:
+    # A title with no curated class keyword must not gain a
+    # prose-dependent suffix: the rule keeps its bare CWE id.
+    write_sarif(
+        tmp_path,
+        [_finding(title="Something odd happened on the dashboard", cwe="CWE-89")],
+    )
+    run = _read(tmp_path)["runs"][0]
+
+    assert [rule["id"] for rule in run["tool"]["driver"]["rules"]] == ["CWE-89"]
+    assert run["results"][0]["ruleId"] == "CWE-89"
+
+
+def test_class_qualified_rule_keeps_bare_cwe_fingerprints(tmp_path: Path) -> None:
+    # Refining a rule id must not churn alerts: fingerprints still key
+    # on the bare CWE, so the same finding at the same location keeps
+    # its fingerprint whether or not its title carries a class keyword.
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    write_sarif(a, [_finding(title="SQL Injection in get_user")])
+    write_sarif(b, [_finding(title="Something odd happened on the dashboard")])
+
+    fp_a = _read(a)["runs"][0]["results"][0]["partialFingerprints"]
+    fp_b = _read(b)["runs"][0]["results"][0]["partialFingerprints"]
+    assert fp_a == fp_b
