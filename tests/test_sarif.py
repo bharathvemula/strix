@@ -458,3 +458,82 @@ def test_class_qualified_rule_keeps_bare_cwe_fingerprints(tmp_path: Path) -> Non
     fp_a = _read(a)["runs"][0]["results"][0]["partialFingerprints"]
     fp_b = _read(b)["runs"][0]["results"][0]["partialFingerprints"]
     assert fp_a == fp_b
+
+
+def _rule_and_location(run_dir: Path) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    result = _read(run_dir)["runs"][0]["results"][0]
+    loc = result["locations"][0]["physicalLocation"]
+    return result["ruleId"], loc, result["partialFingerprints"]
+
+
+def test_title_rewording_keeps_same_rule_id(tmp_path: Path) -> None:
+    # Greptile P1 on #1618: "SQL Injection in get_user" and "SQLi via
+    # string-formatted query in get_user" are the same bug, but the
+    # first qualified to CWE-89/sql-injection while the second fell
+    # back to bare CWE-89, so a consumer keying alerts on
+    # (ruleId, location) would treat the re-scan as a new alert.
+    # Both rewordings must now resolve to the same canonical class.
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    write_sarif(a, [_finding(title="SQL Injection in get_user")])
+    write_sarif(b, [_finding(title="SQLi via string-formatted query in get_user")])
+
+    rule_a, loc_a, fp_a = _rule_and_location(a)
+    rule_b, loc_b, fp_b = _rule_and_location(b)
+
+    assert rule_a == rule_b == "CWE-89/sql-injection"
+    assert (
+        loc_a
+        == loc_b
+        == {
+            "artifactLocation": {"uri": "app.py"},
+            "region": {"startLine": 4},
+        }
+    )
+    assert fp_a == fp_b
+
+
+def test_class_alias_rewordings_share_one_rule_id(tmp_path: Path) -> None:
+    # The fix is a canonical-class mapping, not a one-off for "SQLi":
+    # every equivalent-name pair below must share one rule id.
+    pairs = [
+        (
+            "IDOR via order parameter",
+            "Insecure Direct Object Reference via order parameter",
+            "CWE-639",
+        ),
+        ("Cross-Site Scripting in search", "XSS in search", "CWE-79"),
+        ("Directory traversal in download", "Path traversal in download", "CWE-22"),
+        ("ReDoS in search regex", "Regex denial of service in search regex", "CWE-1333"),
+        ("SQL-injection in login", "SQL Injection in login", "CWE-89"),
+    ]
+    for i, (alias_title, canonical_title, cwe) in enumerate(pairs):
+        a = tmp_path / f"a{i}"
+        b = tmp_path / f"b{i}"
+        a.mkdir()
+        b.mkdir()
+        write_sarif(a, [_finding(title=alias_title, cwe=cwe)])
+        write_sarif(b, [_finding(title=canonical_title, cwe=cwe)])
+        rule_a, _, _ = _rule_and_location(a)
+        rule_b, _, _ = _rule_and_location(b)
+        assert rule_a == rule_b, (alias_title, canonical_title, rule_a, rule_b)
+
+
+def test_distinct_class_still_gets_distinct_rule_id(tmp_path: Path) -> None:
+    # Negative control: canonicalisation must not collapse genuinely
+    # different classes. Same CWE, different class -> different rule.
+    write_sarif(
+        tmp_path,
+        [
+            _finding(id="vuln-0001", title="SQL Injection in get_user", cwe="CWE-89"),
+            _finding(id="vuln-0002", title="Command Injection in get_user", cwe="CWE-89"),
+        ],
+    )
+    run = _read(tmp_path)["runs"][0]
+
+    assert [result["ruleId"] for result in run["results"]] == [
+        "CWE-89/sql-injection",
+        "CWE-89/command-injection",
+    ]

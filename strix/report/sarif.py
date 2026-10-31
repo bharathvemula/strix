@@ -874,7 +874,9 @@ def _rule_id(report: dict[str, Any]) -> str:
     vulnerability-class slug (``CWE-639/insecure-direct-object-reference``)
     so distinct classes that share one CWE do not collapse into a single
     rule. The slug comes from the curated class-keyword catalogue only —
-    never from the raw LLM title — and findings with no curated keyword
+    never from the raw LLM title — and equivalent class names resolve
+    to one canonical keyword (``_CLASS_ALIASES``), so rewordings of the
+    same class keep the same rule id. Findings with no curated keyword
     keep the bare ``CWE-NNN`` id, so rule ids stay stable across
     title rewordings.
     """
@@ -929,7 +931,9 @@ def _class_rule_slug(report: dict[str, Any]) -> str | None:
     Uses only the closed class-keyword catalogue (the same notion of
     class ``_class_fingerprint`` uses), never the raw title: a title
     with no curated keyword yields None and the rule keeps its bare
-    CWE id rather than gaining a prose-dependent suffix.
+    CWE id rather than gaining a prose-dependent suffix. Equivalent
+    names map to their canonical keyword first (``_CLASS_ALIASES``),
+    so e.g. "SQLi" yields the "sql injection" slug, not a bare id.
     """
     title = _string_value(report.get("title")) or ""
     keyword = _curated_class_keyword(title)
@@ -941,7 +945,8 @@ def _class_rule_slug(report: dict[str, Any]) -> str | None:
 # Vulnerability-class keywords for the file-independent class
 # fingerprint. Order matters — first match wins, so precise terms
 # come before fuzzy ones (e.g. "broken access control" before
-# "access control"). Keep this list closed and curated; a future
+# "access control", "regex denial of service" before
+# "denial of service"). Keep this list closed and curated; a future
 # maintainer adding sloppy entries could collapse distinct findings
 # to the same class hash.
 _VULN_CLASS_KEYWORDS = (
@@ -958,7 +963,6 @@ _VULN_CLASS_KEYWORDS = (
     "session fixation",
     "open redirect",
     "path traversal",
-    "directory traversal",
     "command injection",
     "sql injection",
     "code injection",
@@ -978,7 +982,6 @@ _VULN_CLASS_KEYWORDS = (
     "toctou",
     "information disclosure",
     "insecure direct object reference",
-    "idor",
     "bola",
     "bfla",
     "cross-tenant",
@@ -986,17 +989,58 @@ _VULN_CLASS_KEYWORDS = (
     "tenant bypass",
     "auth bypass",
     "rate limiting",
-    "rate limit",
     "weak cryptography",
     "weak hash",
     "weak random",
     "insecure random",
     "tls verification",
     "certificate verification",
-    "denial of service",
     "regex denial of service",
-    "redos",
+    "denial of service",
     "supply chain",
+)
+
+
+# Equivalent names for a canonical class, keyed by that canonical
+# keyword. A rule id (and a class fingerprint) must be a property of
+# the vulnerability class, not of the LLM's phrasing of it: "SQLi",
+# "directory traversal", "IDOR", "ReDoS" and "cross-site scripting"
+# are the same classes as "sql injection", "path traversal",
+# "insecure direct object reference", "regex denial of service" and
+# "xss", so they must resolve to the same canonical keyword — and
+# hence the same rule id — rather than to a bare CWE id or a
+# different slug. Only unambiguous acronyms / full-form synonyms
+# belong here. Near-synonyms that may denote distinct sub-classes
+# (e.g. "bola" vs "insecure direct object reference", "weak random"
+# vs "insecure random", "auth bypass" vs "missing authentication")
+# are deliberately NOT aliased, so distinct classes sharing one CWE
+# still get distinct rules.
+_CLASS_ALIASES: dict[str, tuple[str, ...]] = {
+    "sql injection": ("sqli",),
+    "command injection": ("cmd injection",),
+    "template injection": ("ssti",),
+    "xss": ("cross site scripting",),
+    "csrf": ("cross site request forgery",),
+    "ssrf": ("server side request forgery",),
+    "xxe": ("xml external entity", "xml external entities"),
+    "toctou": ("time of check time of use", "time of check to time of use"),
+    "insecure direct object reference": ("idor",),
+    "path traversal": ("directory traversal",),
+    "rate limiting": ("rate limit",),
+    "regex denial of service": ("redos",),
+    "open redirect": ("unvalidated redirect",),
+    "information disclosure": ("info disclosure",),
+}
+
+
+# (pattern, canonical keyword) pairs in match order: each canonical
+# keyword's aliases sit at that keyword's own position, so an alias
+# and its canonical form have identical priority against every other
+# class. First match wins, as in the catalogue itself.
+_CLASS_MATCH_PATTERNS: tuple[tuple[str, str], ...] = tuple(
+    (pattern, canonical)
+    for canonical in _VULN_CLASS_KEYWORDS
+    for pattern in (*_CLASS_ALIASES.get(canonical, ()), canonical)
 )
 
 
@@ -1109,18 +1153,24 @@ def _class_fingerprint(rule_id: str, report: dict[str, Any]) -> str | None:
 
 
 def _curated_class_keyword(title: str) -> str:
-    """First matching curated class keyword in ``title``, or "".
+    """Canonical curated class keyword for ``title``, or "".
 
     The catalogue is closed and ordered (first match wins); this is
     the stable notion of "the finding's class" shared by fingerprints
-    and CWE rule-id qualification.
+    and CWE rule-id qualification. Equivalent names resolve to their
+    canonical keyword (``_CLASS_ALIASES``), so rewordings of the same
+    class — "SQL Injection" vs "SQLi", "IDOR" vs "insecure direct
+    object reference" — return the same value instead of diverging
+    into a qualified id and a bare CWE id. Titles are normalised
+    (hyphens/underscores become spaces) before matching, so
+    "sql-injection" and "cross-site scripting" match too.
     """
     if not title:
         return ""
-    lower = title.lower()
-    for kw in _VULN_CLASS_KEYWORDS:
-        if kw in lower:
-            return kw
+    normalised = re.sub(r"\s+", " ", title.lower().replace("-", " ").replace("_", " ")).strip()
+    for pattern, canonical in _CLASS_MATCH_PATTERNS:
+        if pattern in normalised:
+            return canonical
     return ""
 
 
